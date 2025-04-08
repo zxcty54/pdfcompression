@@ -1,70 +1,52 @@
-from flask import Flask, request, send_file, render_template_string
-import subprocess
 import os
-import uuid
+import tempfile
+import subprocess
+from flask import Flask, request, send_file
 from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
 
-HTML = """
-<!doctype html>
-<html>
-<head>
-  <title>PDF Compressor</title>
-  <style>
-    body { font-family: Arial, sans-serif; padding: 20px; background: #f0f0f0; text-align: center; }
-    form { background: white; padding: 20px; border-radius: 8px; display: inline-block; }
-    input[type="file"], input[type="submit"] { margin: 10px; }
-  </style>
-</head>
-<body>
-  <h2>Upload PDF to Compress</h2>
-  <form method=post enctype=multipart/form-data>
-    <input type=file name=file required>
-    <br>
-    <input type=submit value="Compress PDF">
-  </form>
-</body>
-</html>
-"""
-
-@app.route('/', methods=['GET', 'POST'])
+@app.route('/compress', methods=['POST'])
 def compress_pdf():
-    if request.method == 'POST':
-        pdf_file = request.files['file']
-        if not pdf_file or not pdf_file.filename.endswith('.pdf'):
-            return "❌ Please upload a valid PDF file."
+    file = request.files.get('file')
+    if not file:
+        return {'error': 'No file provided'}, 400
 
-        os.makedirs('tmp', exist_ok=True)
-        input_path = f'tmp/{uuid.uuid4()}.pdf'
-        output_path = f'tmp/compressed_{uuid.uuid4()}.pdf'
-        pdf_file.save(input_path)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        input_path = os.path.join(tmpdir, 'input.pdf')
+        gs_path = os.path.join(tmpdir, 'compressed_gs.pdf')
+        mutool_path = os.path.join(tmpdir, 'compressed_mutool.pdf')
+        qpdf_path = os.path.join(tmpdir, 'final_compressed.pdf')
 
-        gs_command = [
-            'gs',
-            '-sDEVICE=pdfwrite',
+        file.save(input_path)
+
+        # 1️⃣ Ghostscript Compression
+        subprocess.run([
+            'gs', '-sDEVICE=pdfwrite',
             '-dCompatibilityLevel=1.4',
-            '-dPDFSETTINGS=/ebook',  # /screen /ebook /printer /prepress /default
-            '-dNOPAUSE',
-            '-dQUIET',
-            '-dBATCH',
-            f'-sOutputFile={output_path}',
-            input_path
-        ]
+            '-dPDFSETTINGS=/screen',
+            '-dNOPAUSE', '-dQUIET', '-dBATCH',
+            f'-sOutputFile={gs_path}', input_path
+        ])
 
-        try:
-            subprocess.run(gs_command, check=True)
-            return send_file(output_path, as_attachment=True)
-        except Exception as e:
-            return f"❌ Compression failed: {e}"
-        finally:
-            try: os.remove(input_path)
-            except: pass
-            try: os.remove(output_path)
-            except: pass
+        # 2️⃣ Mutool Clean
+        subprocess.run([
+            'mutool', 'clean', '-gg', '-d', '-s',
+            gs_path, mutool_path
+        ])
 
-    return render_template_string(HTML)
+        # 3️⃣ QPDF Optimization
+        subprocess.run([
+            'qpdf', '--linearize',
+            mutool_path, qpdf_path
+        ])
+
+        return send_file(qpdf_path, as_attachment=True, download_name='compressed.pdf')
+
+@app.route('/')
+def home():
+    return 'PDF Compressor API is live!'
 
 if __name__ == '__main__':
     app.run(debug=True)
